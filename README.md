@@ -19,5 +19,5 @@ sudo dmesg -w
 
 ### Stop
 ```bash
-sudo rmmod timecheker
+sudo rmmod timechecker
 ```
