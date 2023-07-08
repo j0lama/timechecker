@@ -3,8 +3,9 @@
 #include <linux/kthread.h>
 #include <linux/sched.h>
 #include <linux/module.h>
+#include <asm/atomic.h>
 
-#define SLEEP_DELAY 1000 /* usec */
+#define TSC_CALIBRATION_CYCLES 10000
 
 /* From: https://elixir.bootlin.com/linux/v5.9.2/source/include/uapi/linux/sched/types.h#L7 */
 struct sched_param {
@@ -20,6 +21,11 @@ static int threshold = 0;
 module_param(threshold, int, 0660);
 /* kthread structure */
 static struct task_struct * kthread;
+/* Offset value that is exported to KVM */
+atomic64_t offset = ATOMIC64_INIT(0);
+EXPORT_SYMBOL(offset);
+/* Number of TSC cycles per 'threshold' microseconds (us). This is exported to KVM to calculate the offset as time */
+u64 tsc_cycles = 0xFFFFFFFFFFFFFFFF;
 
 
 static inline u64 get_rdtsc(void) __attribute__((always_inline));
@@ -34,27 +40,45 @@ static u64 get_tsc_freq(void)
 {
     u64 start, cycles;
     start = get_rdtsc();
-    udelay(SLEEP_DELAY);
+    udelay(threshold);
     cycles = get_rdtsc() - start;
-    return div64_u64(cycles, SLEEP_DELAY);
+    return cycles;
 }
 
 static int timechecker_thread(void *data)
 {
-    u64 start, end, th_cycles;
+    u64 t0, t1, tmp;
+    int inner = 0, outer = 0;
+    int i;
 
-    /* Calculate TSC counter frequency (cycles per usec) */
-    th_cycles = (SLEEP_DELAY+threshold)*get_tsc_freq();
-
+    /* Calibrate TSC counter frequency (cycles per usec) */
+    printk(KERN_INFO "Calibrating TSC frequency...");
+    for (i = 0; i < TSC_CALIBRATION_CYCLES; i++) {
+        tmp = get_tsc_freq();
+        if(tmp < tsc_cycles)
+            tsc_cycles = tmp;
+    }
+    printk(KERN_INFO "TSC calibrated (%llu cycles per %d microseconds)\n", tsc_cycles, threshold);
+    
+    t1 = get_rdtsc();
     while (!kthread_should_stop()) {
-        start = get_rdtsc();
-        udelay(SLEEP_DELAY);
-        end = get_rdtsc();
-        if((end-start) > (th_cycles)) {
-            printk(KERN_INFO "Preemption detected (%llu > %llu)\n", end-start, th_cycles);
+        t0 = get_rdtsc();
+        if((tmp = (t0-t1)) > (tsc_cycles)) { /* Outer */
+            outer += 1;
+            atomic64_add(tmp, &offset);
+            printk(KERN_INFO "Outer preemption detected (%llu > %llu)\n", t0-t1, tsc_cycles);
+        }
+        t1 = get_rdtsc();
+        if((tmp = (t1-t0)) > (tsc_cycles)) { /* Inner */
+            inner += 1;
+            atomic64_add(tmp, &offset);
+            printk(KERN_INFO "Inner preemption detected (%llu > %llu)\n", t1-t0, tsc_cycles);
         }
     }
     printk(KERN_INFO "Exiting timechecker...\n");
+    printk(KERN_INFO "Timechecker summary: inner %d, outer %d\n", inner, outer);
+    printk(KERN_INFO "Accumulated offset: %llu cycles\n", atomic64_read(&offset));
+
     return 0;
 }
 
@@ -69,6 +93,7 @@ static int __exit  timechecker_init(void)
     kthread_bind(kthread, cpu_id);
 
     /* Asign max FIFO priority */
+    /* This only work for latest kernels */
     sp.sched_priority = MAX_RT_PRIO;
     sched_setscheduler_nocheck(kthread, SCHED_FIFO, &sp);
 
