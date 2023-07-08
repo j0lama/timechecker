@@ -25,9 +25,9 @@ sudo rmmod timechecker
 ### Access values calculated by timechecker
 Timechecker exports two symbols: **offset** and **tsc_cycles**. These two symbols should be accessibles from other parts of the kernels as *extern* variables.
 
-**offset** contains the cumulative cycles detected by timechecker that should be corrected/adjusted in KVM.
+**offset**: contains the cumulative cycles detected by timechecker that should be corrected/adjusted in KVM. This variable is atomic64_t, so it must be access using the asm/atomic.h functions.
 
-**tsc_cycles** contains the number of TSC cycles per *threshold* (value passed to timechecker) microseconds.
+**tsc_cycles**: contains the number of TSC cycles per *threshold* (value passed to timechecker) microseconds. This variable is u64.
 
 Calculate offset as microseconds:
 ```
